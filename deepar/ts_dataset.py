@@ -2,17 +2,8 @@ from abc import ABC
 
 from pandas.core.dtypes.common import is_datetime64_any_dtype, is_numeric_dtype
 
-from deepar.exceptions import DataSchemaCheckException
-from deepar.utils import detect_date_consecutive, detect_date_freq
-
-
-class Dataset(ABC):
-    def __init__(self):
-        super().__init__()
-
-    def next_batch(self, **kwargs):
-        pass
-
+from deepar.exceptions import DataSchemaCheckException, ParameterException
+from deepar.utils import detect_date_consecutive, detect_date_freq, time_features_from_frequency_str
 
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder, StandardScaler
 import numpy as np
@@ -26,18 +17,37 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras import backend as K
 from tensorflow.keras.callbacks import Callback, EarlyStopping, ModelCheckpoint, TensorBoard
 import logging
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-class TimeSeriesTrain(Dataset):
+class Dataset(ABC):
+    def __init__(self):
+        super().__init__()
+
+    def next_batch(self, **kwargs):
+        pass
+
+
+class TSTrainDataset(Dataset):
     def __init__(self, df, date_col, target_col, groupby_col, freq, feat_dynamic_reals=None, feat_static_cats=None,
                  feat_static_reals=None, lags=None, valid_split=0,
                  count_data=True):
         """
-        假设groupby_cols 只为一个
-        且cat_feats要包括groupby_cols
+
+        Parameters
+        ----------
+        df: 训练集
+        date_col: 日期列，不能是date_index（pytorch-forecasting里的是需要index），需要是datetime格式的
+        target_col：目标列，需要是数值类型
+        groupby_col: 唯一的groupby,类比与gluonts里的ITEM_ID
+        freq：pandas freq标准，可参考https://pandas.pydata.org/docs/user_guide/timeseries.html
+        feat_dynamic_reals：随着时间变化会变化的数值特征，比如价格
+        feat_static_cats：随着时间变化不变的类别特征，比如城市(需要包括groupby_col)
+        feat_static_reals：随着时间变化不变的数值特征
+        lags：是否做lag，lag的话做多少
+        valid_split: 最后多少的数据集会作为Validation
+        count_data: 是否为实数预测，如果是True代表预测结果会是自然数，并且用负二项分布
         """
         self.df = df
         self.freq = freq
@@ -67,12 +77,6 @@ class TimeSeriesTrain(Dataset):
         self._store_target_means()
         self._standardize()
         self._record_missing_target_values()
-        # self._features = len(self.cont_feats) + len(
-        #     self.cat_feats)  # 本来cat_feats会包括groupby 但是groupby不算features，但是未来还会加一个prev_target
-        # self._scale_cont_feats()
-        # self._scale_target()
-        # self.train_dat = self.create_dataloader()
-        # self.create_feat_tf()
 
     def _data_check(self, data):
         """
@@ -126,12 +130,6 @@ class TimeSeriesTrain(Dataset):
         self.raw_df = self.df.copy()
         self.target_col = 'target'
 
-    def _date_interpolation(self):
-        """
-        调用gaia datefiller一下，把数据集local min- global max搞成一致的？
-        """
-        pass
-
     def _add_lag_features(self, df):
         """
 
@@ -153,15 +151,19 @@ class TimeSeriesTrain(Dataset):
 
     def _add_date_features(self):
         """
-        增加日期相关的特征，这里增加的特征和论文中保持一致
+        增加日期相关的特征，这里增加的特征和Gluonts的方法保持一致
         """
-        # TODO: gluonts是根据freq自动产生符合的特征，比如如果freq为month，不会去增加minute，second，反过来如果freq细，会增加
-        self.df["year"] = self.df[self.date_col].dt.year
-        self.df["month"] = self.df[self.date_col].dt.month
-        self.df["day"] = self.df[self.date_col].dt.day
-        self.df["hour"] = self.df[self.date_col].dt.hour
+        new_feats = []
+        func_list = time_features_from_frequency_str(self.freq)
+        for func in func_list:
+            new_feats.append(func.__name__)
+            self.df[func.__name__] = func(self.df[self.date_col].dt)
+        # self.df["year"] = self.df[self.date_col].dt.year
+        # self.df["month"] = self.df[self.date_col].dt.month
+        # self.df["day"] = self.df[self.date_col].dt.day
+        # self.df["hour"] = self.df[self.date_col].dt.hour
         self.df.drop(columns=[self.date_col], inplace=True)
-        new_feats = ['year', 'month', 'day', 'hour']
+        # new_feats = ['year', 'month', 'day', 'hour']
         for feat in new_feats:
             if feat not in self.cont_feats:
                 self.cont_feats.append(feat)
@@ -184,10 +186,8 @@ class TimeSeriesTrain(Dataset):
         # 1 extra for test cats not included in train or val
         self.ts_unique_values = self.df[self.groupby_col].unique()
         self._num_cats = self.df[self.groupby_col].nunique() + 1
-        self._cat_nunique = dict()
         self.df[self.cat_feats] = self.df[self.cat_feats].astype(str)
         for cat in self.cat_feats:
-            self._cat_nunique[cat] = self.df[cat].nunique() + 1
             label_encoder = LabelEncoder()
             cat_names = self.df[cat].append(pd.Series(['dummy_test_category']))
             label_encoder.fit(cat_names)
@@ -327,13 +327,9 @@ class TimeSeriesTrain(Dataset):
                 sampled_cat_data = self._sample_ts(cat_data, window_size)
                 # print(f"window size < len(time series):{sampled_cat_data.shape}")
             else:
-                # TODO: 否则这里是不是要pad填充？还是等于cat_data?
                 sampled_cat_data = cat_data
                 print(f"window size > len(time series):{sampled_cat_data.shape}")
 
-            # 如果确认输入数据里不存在nan的目标值，就不需要跑这个函数
-            # sampled_cat_data = self._sample_missing_prev_targets(sampled_cat_data, cat_data['_age'], model, window_size,
-            #                                                      batch_size)
             sampled.append(sampled_cat_data)
         # 窗口采样完的数据拼接起来，然后产生batch输出
         data = pd.concat(sampled)
@@ -345,15 +341,10 @@ class TimeSeriesTrain(Dataset):
 
         # print(f"cont input: {cont_inputs.shape}")
         cat_inputs = []
-        for cat in self.cat_feats+self.static_real_feats:
+        for cat in self.cat_feats + self.static_real_feats:
             cat_input = tf.constant(data[cat].values.reshape(batch_size, window_size, -1), dtype=tf.float32)
             cat_inputs.append(cat_input)
-        # cat_inputs = tf.constant(data[self.cat_feats].values.reshape(batch_size, window_size, -1), dtype=tf.float32)
-        # print(f"cat_inputs: {cat_inputs.shape}")
-        # cat_inputs = tf.constant(
-        #     data[self.groupby_col].values.reshape(batch_size, window_size),
-        #     dtype=tf.float32
-        # )
+
         cat_labels = tf.constant(cat_samples.reshape(batch_size, 1), dtype=tf.int32)
 
         targets = tf.constant(data['target'].values.reshape(batch_size, window_size, 1), dtype=tf.float32)
@@ -443,10 +434,11 @@ class TimeSeriesTrain(Dataset):
                         df.drop(columns=self.cont_feats).values.reshape(1, window_size, -1),
                         batch_size, axis=0),
                     dtype=tf.float32)
-                cat = tf.constant(np.repeat(df[self.cat_feats+self.static_real_feats].values.reshape(1, window_size, -1), batch_size, axis=0),
-                                  dtype=tf.float32)
+                cat = tf.constant(
+                    np.repeat(df[self.cat_feats + self.static_real_feats].values.reshape(1, window_size, -1),
+                              batch_size, axis=0),
+                    dtype=tf.float32)
                 preds = model([cont, cat], training=training)[0][0]
-                # refill indices (add 1 for each negative observation, i.e. before start of series)
                 refill_indices = df.index[age_list.isin(self._missing_tgt_vals[time_series_name])]
                 if df.index[0] > 0:
                     refill_values = [preds[i] for i in [r - df.index[0] for r in refill_indices]]
@@ -473,13 +465,6 @@ class TimeSeriesTrain(Dataset):
         return self._target_means
 
     @property
-    def cat_nunique(self):
-        """
-        category 特征的特征和nunique值的字典
-        """
-        return self._cat_nunique
-
-    @property
     def train_set_ages(self):
         return self._train_set_ages
 
@@ -488,12 +473,12 @@ class TimeSeriesTrain(Dataset):
         return self._standard_scaler
 
 
-class TimeSeriesTest(TimeSeriesTrain):
+class TSTestDataset(TSTrainDataset):
     """
     输入的数据集不需要包含target
     """
 
-    def __init__(self, ts_train: TimeSeriesTrain, test_df):
+    def __init__(self, ts_train: TSTrainDataset, test_df):
         self.ts_train = ts_train
         self.df = test_df
         self.inherit_train_ds()
@@ -552,9 +537,6 @@ class TimeSeriesTest(TimeSeriesTrain):
         assert len(test_df) == len(self.df)
         return test_df.drop(columns=['ds_label'])
 
-    def _date_interpolation(self):
-        pass
-
     def _add_age_features(self):
         self._test_groups = self.df[self.groupby_col].unique()
         self._new_test_groups = []
@@ -576,7 +558,7 @@ class TimeSeriesTest(TimeSeriesTrain):
         else:
             self._horizon = 0
         if self.lags and min(self.lags) > self._horizon:
-            raise Exception('Lags can leak')
+            raise ParameterException('Lags can leak')
 
     def _standardize(self):
         """
@@ -615,7 +597,6 @@ class TimeSeriesTest(TimeSeriesTrain):
         if not self._batch_test_data_prepared:
             self._prepare_batched_test_data(batch_size, window_size, include_all_training)
 
-        # if done with full sequence through time for this batch
         if self._batch_idx == self._horizon + self._train_batch_count:
             self._iterations += 1
             self._batch_idx = 0
@@ -639,7 +620,6 @@ class TimeSeriesTest(TimeSeriesTrain):
         batch_data = [df.iloc[batch_start_idx: batch_end_idx, :]
                       for df in self._prepped_data_list[df_start_idx:df_end_idx]]
 
-        # sample missing 'targets' from current model parameters (for 'prev_targets')
         # 不需要如果targets没有nan的话
         # 如果batch data的大小不到窗口大小，由最后一行填充至窗口大小
         batch_data = [
@@ -654,7 +634,7 @@ class TimeSeriesTest(TimeSeriesTrain):
             x_cont = np.append(x_cont, [x_cont[0]] * (batch_size - len(batch_data)), axis=0)
         x_cont = tf.Variable(x_cont, dtype=tf.float32)
         x_cats = []
-        for cat in self.cat_feats+self.static_real_feats:
+        for cat in self.cat_feats + self.static_real_feats:
             x_cat = batch_df[cat].values.reshape(len(batch_data), window_size)
             if len(batch_data) < batch_size:
                 x_cat = np.append(x_cat, [x_cat[0]] * (batch_size - len(batch_data)), axis=0)
@@ -684,7 +664,7 @@ class TimeSeriesTest(TimeSeriesTrain):
                 # 发现是一个全新时间序列
                 logger.error(
                     f"There is new time series {self.groupby_col}={cat} not in training data but in test data!")
-                # TODO: 这种情况其实需要填充一个全0的数据，暂时假设不会发生
+                # 这种情况其实需要填充一个全0的数据，暂时假设不会发生
                 # train_data = pd
             else:
                 # 如果是老时间序列，把对应的训练集数据拿出来
@@ -709,7 +689,7 @@ class TimeSeriesTest(TimeSeriesTrain):
         self._batch_idx = 0
 
     def _add_prev_target_col(self, df, train_df=None):
-        return super(TimeSeriesTest, self)._add_prev_target_col(df, train_df)
+        return super(TSTestDataset, self)._add_prev_target_col(df, train_df)
 
     @property
     def horizon(self):

@@ -19,8 +19,9 @@ import logging
 import os
 from scipy import stats
 
+from deepar.exceptions import ParameterException
 from deepar.loss import GaussianLogLikelihood, negative_binomial_sampling, NegativeBinomialLogLikelihood
-from deepar.time_series import TimeSeriesTrain, TimeSeriesTest
+from deepar.ts_dataset import TSTrainDataset, TSTestDataset
 from deepar.ts_generator import train_ts_generator, test_ts_generator
 from deepar.callbacks import EarlyStopping
 from deepar.utils import build_tf_lookup_hashtable, unscale
@@ -29,10 +30,27 @@ logger = logging.getLogger(__name__)
 
 
 class DeepARLearner:
-    def __init__(self, train_dataset: TimeSeriesTrain, cell_type='lstm', emb_dim=128, num_cells=128, num_layers=2,
+    def __init__(self, train_dataset: TSTrainDataset, cell_type='lstm', emb_dim=128, num_cells=128, num_layers=2,
                  learning_rate=0.001,
                  batch_size=64,
                  train_window=20, dropout=0.1, optimizer='adam', verbose=0, random_seed=None):
+        """
+
+        Parameters
+        ----------
+        train_dataset：训练集的TSTrainDataset实例
+        cell_type: 中间层使用lstm，rnn还是gru
+        emb_dim：类别类特征要进行embedding，那么embedding的output dim
+        num_cells：每一层选定cell的个数
+        num_layers：recurrent layer的层数
+        learning_rate：学习率
+        batch_size：batch大小
+        train_window：采样窗口（回看窗口）的长度
+        dropout：cell的dropout大小
+        optimizer：优化器，'sgd'或者'adam'
+        verbose：是否打出log
+        random_seed：随机种子
+        """
         if random_seed is not None:
             tf.random.set_seed(random_seed)
         if verbose == 1:
@@ -91,7 +109,7 @@ class DeepARLearner:
             rnn_cells = [SimpleRNNCell(units=self.num_cells, name=f'rnn_{layer}', dropout=self._dropout,
                                        recurrent_dropout=self._dropout, ) for layer in range(self.num_layers)]
         else:
-            raise Exception('cell type not supported')
+            raise ParameterException('cell type not supported')
         stacked_lstm = StackedRNNCells(rnn_cells)
         last_layer = RNN(stacked_lstm,
                          stateful=True,
@@ -290,7 +308,7 @@ class DeepARLearner:
             mu = softplus(mu)
         return mu, sigma
 
-    def predict(self, test_dataset: TimeSeriesTest, horizon=None, samples=100, point_estimate=False,
+    def predict(self, test_dataset: TSTestDataset, horizon=None, samples=100, point_estimate=False,
                 confidence_interval=False,
                 confidence_level=0.95, include_all_training=False, return_in_sample_predictions=True):
         """
@@ -301,6 +319,8 @@ class DeepARLearner:
         horizon
         samples
         point_estimate
+        confidence_interval
+        confidence_level
         include_all_training
         return_in_sample_predictions
 
@@ -337,14 +357,9 @@ class DeepARLearner:
                 self._model.get_layer("rnn").reset_states()
             print(f"horizon idx :{horizon_idx}")
             # 祖先采样
-            # don't need to replace for first test batch bc have tgt from last training example
             if horizon_idx > 1:
-                # add one sample from previous predictions to test batches
-                # all dim 0, first row of dim 1, last col of dim 3
-                # pdb.set_trace()
                 x_test_new = x_test[0][:, :1, -1:].assign(mu[:, :1, :])
                 x_test = [x_test_new] + x_test[1:]
-                # x_test = self._add_prev_target(x_test, mu[:, :1, :])
             # make predictions
             # import pdb
             # pdb.set_trace()
@@ -388,12 +403,11 @@ class DeepARLearner:
                 for draw_list, sample_list in zip(draws, test_samples[iteration_index * self._batch_size: (
                                                                                                                   iteration_index + 1) * self._batch_size], ):
                     sample_list.append(draw_list)
-        # reset batch idx and iterations_index so we can call predict() multiple times
         test_dataset.batch_idx = 0
         test_dataset.iterations = 0
         test_dataset.batch_test_data_prepared = False
-
-        # filter test_samples depending on return_in_sample_predictions param
+        import pdb
+        pdb.set_trace()
         if return_in_sample_predictions:
             pred_samples = np.array(test_samples)[:, -(self.train_dataset.max_age + horizon):, :]
         else:
@@ -401,10 +415,6 @@ class DeepARLearner:
         return pred_samples
 
     def _squeeze(self, mu, sigma, squeeze_dims=[2]):
-        """
-        private util function that squeezes predictions along certain dimensions depending on whether
-            we are predicting in-sample or out-of-sample
-        """
         return tf.squeeze(mu, squeeze_dims), tf.squeeze(sigma, squeeze_dims)
 
     def _draw_samples(self, mu_tensor, sigma_tensor, point_estimate=False, confidence_interval=False,
@@ -421,15 +431,13 @@ class DeepARLearner:
             return [np.repeat(mu, samples) for mu in mu_tensor]
         if confidence_interval and confidence_level < 1 and confidence_level > 0:
             z_score = stats.norm.ppf(confidence_level)
+            import pdb
+            pdb.set_trace()
             return [[(mu - sigma * z_score).numpy(), mu.numpy(), (mu + sigma * z_score).numpy()] for mu, sigma in
                     zip(mu_tensor, sigma_tensor)]
         elif self.train_dataset.count_data:
+            import pdb
+            pdb.set_trace()
             return [list(negative_binomial_sampling(mu, sigma, samples)) for mu, sigma in zip(mu_tensor, sigma_tensor)]
         else:
             return [list(np.random.normal(mu, sigma, samples)) for mu, sigma in zip(mu_tensor, sigma_tensor)]
-
-    def _reset_predict_states(self, test_dataset):
-        # reset batch idx and iterations_index so we can call predict() multiple times
-        test_dataset.batch_idx = 0
-        test_dataset.iterations = 0
-        test_dataset.batch_test_data_prepared = False
