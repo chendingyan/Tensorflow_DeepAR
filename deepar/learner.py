@@ -31,9 +31,8 @@ logger = logging.getLogger(__name__)
 
 class DeepARLearner:
     def __init__(self, train_dataset: TSTrainDataset, cell_type='lstm', emb_dim=128, num_cells=128, num_layers=2,
-                 learning_rate=0.001,
-                 batch_size=64,
-                 train_window=20, dropout=0.1, optimizer='adam', verbose=0, random_seed=None):
+                 learning_rate=0.001, batch_size=64, train_window=20, dropout=0.1, optimizer='adam', verbose=0,
+                 random_seed=None):
         """
 
         Parameters
@@ -316,13 +315,13 @@ class DeepARLearner:
         Parameters
         ----------
         test_dataset
-        horizon
-        samples
-        point_estimate
-        confidence_interval
-        confidence_level
-        include_all_training
-        return_in_sample_predictions
+        horizon：forecast horizon，注意不可超出测试集的horizon大小
+        samples：如果采样的话，采样多少个点
+        point_estimate: 是否进行点预测
+        confidence_interval：是否进行置信区间的预测， 请注意point_estimate和confidence_interval不可同时为True
+        confidence_level：置信百分比，默认95%
+        include_all_training：是否包括所有的训练数据进行预测
+        return_in_sample_predictions：返回的结果里是否包括训练集数据及其结果
 
         Returns
         -------
@@ -406,8 +405,6 @@ class DeepARLearner:
         test_dataset.batch_idx = 0
         test_dataset.iterations = 0
         test_dataset.batch_test_data_prepared = False
-        import pdb
-        pdb.set_trace()
         if return_in_sample_predictions:
             pred_samples = np.array(test_samples)[:, -(self.train_dataset.max_age + horizon):, :]
         else:
@@ -427,17 +424,15 @@ class DeepARLearner:
 
         """
         # TODO: 支持分位数 np.quantile
+        if point_estimate and confidence_interval:
+            raise ParameterException("不可同时点预测和置信区间采样，可以分别predict两次")
         if point_estimate:
             return [np.repeat(mu, samples) for mu in mu_tensor]
         if confidence_interval and confidence_level < 1 and confidence_level > 0:
             z_score = stats.norm.ppf(confidence_level)
-            import pdb
-            pdb.set_trace()
             return [[(mu - sigma * z_score).numpy(), mu.numpy(), (mu + sigma * z_score).numpy()] for mu, sigma in
                     zip(mu_tensor, sigma_tensor)]
         elif self.train_dataset.count_data:
-            import pdb
-            pdb.set_trace()
             return [list(negative_binomial_sampling(mu, sigma, samples)) for mu, sigma in zip(mu_tensor, sigma_tensor)]
         else:
             return [list(np.random.normal(mu, sigma, samples)) for mu, sigma in zip(mu_tensor, sigma_tensor)]
