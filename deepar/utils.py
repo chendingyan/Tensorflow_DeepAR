@@ -41,11 +41,15 @@ def build_tf_lookup_hashtable(scale_data):
     )
 
 
-def unscale(mu, sigma, scale_keys, lookup_hashtable):
+def unscale(mu, sigma, scale_values):
     """
     unscale prediction
+    scale_values {tf.Tensor} -- values that should unscale mu and scale
+    unscaled_mu = mu * scale_values
+    unscaled_sigma = sigma / sqrt(scale_values)
     """
-    scale_values = tf.expand_dims(lookup_hashtable.lookup(scale_keys), 1)
+
+    scale_values = tf.expand_dims(tf.expand_dims(scale_values, -1), -1)
     unscaled_mu = tf.multiply(mu, scale_values)
     unscaled_sigma = tf.divide(sigma, tf.sqrt(scale_values))
     return unscaled_mu, unscaled_sigma

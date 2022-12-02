@@ -21,5 +21,7 @@ def train_ts_generator(train_dataset, model, batch_size, window_size, valid_set=
 
 
 def test_ts_generator(test_dataset, model, batch_size, window_size, include_all_training=False):
-    while 1:
+    c = 0
+    while c < test_dataset.test_len:
+        c += 1
         yield test_dataset.next_batch(model, batch_size, window_size, include_all_training)

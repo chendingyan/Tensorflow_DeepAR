@@ -17,6 +17,7 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras import backend as K
 from tensorflow.keras.callbacks import Callback, EarlyStopping, ModelCheckpoint, TensorBoard
 import logging
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -68,7 +69,7 @@ class TSTrainDataset(Dataset):
         self.df = self._data_check(self.df)
         self._clean_features()
         self._set_mask_value()
-        self.df = self._add_lag_features(self.df)
+        # self.df = self._add_lag_features(self.df)
         self._add_date_features()
         self._add_age_features()
         # 增加lags，更新cont_feats
@@ -213,9 +214,9 @@ class TSTrainDataset(Dataset):
         # _target_means代表加权采样的放缩系数v
         # self._target_means代表每个group下的目标值的平均值+1
         self._target_means = 1 + self._train_data.groupby(self.groupby_col)['target'].agg('mean')
-        self._create_sampling_distribution()
 
-        target_mean = self._train_data['target'].dropna().mean()
+        target_mean = 1 + self._train_data['target'].dropna().mean()
+        self._create_sampling_distribution()
         # add 'dummy_test_category' as key to target means
         self._target_means.loc[self._label_encoder.transform(['dummy_test_category'])[0]] = target_mean
         # 如果在Validation中的groupby value 在训练集中不存在，使用训练集drop na后的mean填充
@@ -345,10 +346,10 @@ class TSTrainDataset(Dataset):
             cat_input = tf.constant(data[cat].values.reshape(batch_size, window_size, -1), dtype=tf.float32)
             cat_inputs.append(cat_input)
 
-        cat_labels = tf.constant(cat_samples.reshape(batch_size, 1), dtype=tf.int32)
-
+        # cat_labels = tf.constant(cat_samples.reshape(batch_size, 1), dtype=tf.int32)
+        scale_values = tf.constant(self._target_means[cat_samples].values, dtype=tf.float32)
         targets = tf.constant(data['target'].values.reshape(batch_size, window_size, 1), dtype=tf.float32)
-        return [cont_inputs] + cat_inputs, cat_labels, targets
+        return [cont_inputs] + cat_inputs, scale_values, targets
 
     def _add_prev_target_col(self, df, train_df=None):
         """
@@ -379,7 +380,7 @@ class TSTrainDataset(Dataset):
                 df['prev_target'] = train_df['target'].dropna().tail(1).repeat(repeats=df.shape[0]).reset_index(
                     drop=True)
         # 放缩prev_target
-        self._scale_prev_target_col(df, means)
+        # self._scale_prev_target_col(df, means)
         # 其实应该不太需要插值
         df['prev_target'] = df['prev_target'].interpolate(limit_direction='both')
         return df
@@ -481,6 +482,7 @@ class TSTestDataset(TSTrainDataset):
     def __init__(self, ts_train: TSTrainDataset, test_df):
         self.ts_train = ts_train
         self.df = test_df
+        self.test_len = len(test_df)
         self.inherit_train_ds()
         self._process_new_test_data()
         self._batch_test_data_prepared = False
@@ -516,7 +518,7 @@ class TSTestDataset(TSTrainDataset):
         temp_whole_df = pd.concat([train_df, test_df]).reset_index(drop=True)
         self._data_check(temp_whole_df)
         self.df = self._data_check(self.df)
-        self.df = self._add_lag_features(temp_whole_df)
+        # self.df = self._add_lag_features(temp_whole_df)
         self._add_age_features()
         self._add_date_features()
         # 选取一样的特征，但是没有经过scale
@@ -639,9 +641,11 @@ class TSTestDataset(TSTrainDataset):
             if len(batch_data) < batch_size:
                 x_cat = np.append(x_cat, [x_cat[0]] * (batch_size - len(batch_data)), axis=0)
             x_cats.append(tf.constant(x_cat, dtype=tf.float32))
-        x_cat_key = tf.constant(x_cat[:, :1], dtype=tf.int32)
+        # x_cat_key = tf.constant(x_cat[:, :1], dtype=tf.int32)
+        x_cat_keys = list(batch_df.groupby(self.groupby_col).groups.keys())
+        x_scale_values = tf.constant(self.ts_train.target_means[x_cat_keys].values, dtype=tf.float32)
 
-        return [x_cont] + x_cats, x_cat_key, self._batch_idx - self._train_batch_count, self._iterations
+        return ([x_cont] + x_cats, x_scale_values, self._batch_idx - self._train_batch_count, self._iterations)
 
     def _prepare_batched_test_data(self, batch_size, window_size, include_all_training=False):
         """

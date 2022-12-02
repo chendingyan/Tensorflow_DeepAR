@@ -218,15 +218,14 @@ class DeepARLearner:
         early_stopping_cb = EarlyStopping(
             patience=stopping_patience, active=early_stopping, delta=stopping_delta
         )
-        self.v_hashtable = build_tf_lookup_hashtable(self.train_dataset.target_means)
         best_metric = math.inf
         for epoch in range(epochs):
             logger.info(f"Start of epoch {epoch}")
-            for batch, (x_batch_train, cat_labels, y_batch_train) in enumerate(train_gen):
+            for batch, (x_batch_train, scale_values, y_batch_train) in enumerate(train_gen):
                 with tf.GradientTape(persistent=True) as tape:
                     mu, presigma = self.model(x_batch_train, training=True)
                     mu, sigma = self._softplus(mu, presigma)
-                    mu, sigma = unscale(mu, sigma, cat_labels, self.v_hashtable)
+                    mu, sigma = unscale(mu, sigma, scale_values)
                     loss_value = self._loss_fn(y_batch_train, (mu, sigma))
                 # tensorboard
                 if self._tb:
@@ -253,11 +252,11 @@ class DeepARLearner:
             if val_gen is not None:
                 logger.info(f"End of epoch {epoch}, validating...")
 
-                for batch, (x_batch_val, cat_labels, y_batch_val) in enumerate(val_gen):
+                for batch, (x_batch_val, scale_values, y_batch_val) in enumerate(val_gen):
                     with tf.GradientTape() as tape:
                         mu, sigma = self.model(x_batch_val, training=True)
                         mu, sigma = self._softplus(mu, presigma)
-                        mu, sigma = unscale(mu, sigma, cat_labels, self.v_hashtable)
+                        mu, sigma = unscale(mu, sigma, scale_values)
                         loss_value = self._loss_fn(y_batch_val, (mu, sigma))
 
                     eval_mae(y_batch_val, mu)
@@ -343,7 +342,8 @@ class DeepARLearner:
         prev_iteration_index = 0
 
         for batch_idx, batch in enumerate(test_gen):
-            x_test, scale_keys, horizon_idx, iteration_index = batch
+            print(f"batch {batch_idx}")
+            x_test, scale_values, horizon_idx, iteration_index = batch
             if iteration_index is None:
                 break
             if horizon_idx == horizon:
@@ -353,7 +353,7 @@ class DeepARLearner:
 
             # reset lstm states for new sequence of predictions through time
             if iteration_index != prev_iteration_index:
-                self._model.get_layer("rnn").reset_states()
+                self.model.get_layer("rnn").reset_states()
             print(f"horizon idx :{horizon_idx}")
             # 祖先采样
             if horizon_idx > 1:
@@ -366,10 +366,9 @@ class DeepARLearner:
             mu, sigma = self._softplus(mu, presigma)
             # unscale
             scaled_mu, scaled_sigma = unscale(
-                mu[: scale_keys.shape[0]],
-                sigma[: scale_keys.shape[0]],
-                scale_keys,
-                self.v_hashtable,
+                mu[: scale_values.shape[0]],
+                sigma[: scale_values.shape[0]],
+                scale_values,
             )
             # in-sample predictions (ancestral sampling)
             if horizon_idx <= 0:
@@ -380,9 +379,11 @@ class DeepARLearner:
                     )
                 scaled_mu, scaled_sigma = self._squeeze(scaled_mu, scaled_sigma)
 
-                for mu_sample, sigma_sample, sample_list in zip(scaled_mu, scaled_sigma,
-                                                                test_samples[iteration_index * self._batch_size: (
-                                                                                                                         iteration_index + 1) * self._batch_size], ):
+                for mu_sample, sigma_sample, sample_list in zip(scaled_mu,
+                                                                scaled_sigma,
+                                                                test_samples[
+                                                                iteration_index * self._batch_size: (
+                                                                                                            iteration_index + 1) * self._batch_size], ):
                     draws = self._draw_samples(mu_sample, sigma_sample, point_estimate=point_estimate, samples=samples,
                                                confidence_interval=confidence_interval,
                                                confidence_level=confidence_level)
@@ -399,8 +400,10 @@ class DeepARLearner:
                 draws = self._draw_samples(squeezed_mu, squeezed_sigma, point_estimate=point_estimate, samples=samples,
                                            confidence_interval=confidence_interval,
                                            confidence_level=confidence_level)
-                for draw_list, sample_list in zip(draws, test_samples[iteration_index * self._batch_size: (
-                                                                                                                  iteration_index + 1) * self._batch_size], ):
+                for draw_list, sample_list in zip(draws,
+                                                  test_samples[
+                                                  iteration_index * self._batch_size: (
+                                                                                              iteration_index + 1) * self._batch_size], ):
                     sample_list.append(draw_list)
         test_dataset.batch_idx = 0
         test_dataset.iterations = 0
