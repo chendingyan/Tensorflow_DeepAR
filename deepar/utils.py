@@ -11,6 +11,8 @@ def detect_date_consecutive(data, date_col, freq):
     日期不连续，导致diff的结果unique不同
     """
     temp = (round(data[date_col].diff() / np.timedelta64(1, freq))).reset_index()
+    if len(temp) == 1:
+        return True
     if temp[1:][date_col].nunique() > 1:
         return False
     return True
@@ -21,6 +23,8 @@ def detect_date_freq(data, date_col, freq):
     日期freq和真实的日期对不上
     """
     temp = (round(data[date_col].diff() / np.timedelta64(1, freq))).reset_index()
+    if len(temp) == 1:
+        return True
     if temp[1:][date_col].unique()[0] != 1:
         return False
     return True

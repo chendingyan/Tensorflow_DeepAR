@@ -107,7 +107,6 @@ class TSTrainDataset(Dataset):
             raise DataSchemaCheckException(f'输入主键 {primary_key} 存在空值（Nan），请提前检查主键中是否有空值')
         if len(data.drop_duplicates(subset=primary_key)) != len(data):
             raise DataSchemaCheckException(f'输入主键 {primary_key} 并不唯一，请重新检查输入主键的正确性')
-
         if not is_datetime64_any_dtype(data[self.date_col]):
             data[self.date_col] = pd.to_datetime(data[self.date_col])
         if self.target_col and not is_numeric_dtype(data[self.target_col]):
@@ -128,7 +127,7 @@ class TSTrainDataset(Dataset):
             self.cont_feats + self.cat_feats + self.static_real_feats + [self.date_col] + [self.target_col]]
         # 把目标列定死为target，其实没必要
         self.df = self.df.rename(columns={self.target_col: 'target'})
-        self.raw_df = self.df.copy()
+        self._raw_df = self.df.copy()
         self.target_col = 'target'
 
     def _add_lag_features(self, df):
@@ -473,6 +472,9 @@ class TSTrainDataset(Dataset):
     def standard_scaler(self):
         return self._standard_scaler
 
+    @property
+    def raw_df(self):
+        return self._raw_df.copy()
 
 class TSTestDataset(TSTrainDataset):
     """
@@ -481,7 +483,9 @@ class TSTestDataset(TSTrainDataset):
 
     def __init__(self, ts_train: TSTrainDataset, test_df):
         self.ts_train = ts_train
-        self.df = test_df
+        raw_df = self.ts_train.raw_df
+        # 固定一下行列顺序
+        self.df = test_df[raw_df.columns.drop('target')]
         self.test_len = len(test_df)
         self.inherit_train_ds()
         self._process_new_test_data()
@@ -515,8 +519,8 @@ class TSTestDataset(TSTrainDataset):
         test_df = self.df.copy()
         test_df['ds_label'] = 'test'
         test_df['target'] = 0
-        temp_whole_df = pd.concat([train_df, test_df]).reset_index(drop=True)
-        self._data_check(temp_whole_df)
+        # temp_whole_df = pd.concat([train_df, test_df]).reset_index(drop=True)
+        # self._data_check(temp_whole_df)
         self.df = self._data_check(self.df)
         # self.df = self._add_lag_features(temp_whole_df)
         self._add_age_features()
@@ -574,7 +578,8 @@ class TSTestDataset(TSTrainDataset):
     def _standardize_df(self, df):
         covariate_names = [self.groupby_col] + list(self._encoder_dict.keys())
         covariate_mask = [False if col_name in covariate_names else True for col_name in self.df.columns]
-        df.loc[:, covariate_mask] = self._standard_scaler.transform(df.loc[:, covariate_mask].astype('float'))
+        df.loc[:, covariate_mask] = self._standard_scaler.transform(
+            df.loc[:, covariate_mask][self._standard_scaler.feature_names_in_].astype('float'))
         return df
 
     def next_batch(self, model, batch_size, window_size, include_all_training=False):
@@ -632,6 +637,8 @@ class TSTestDataset(TSTrainDataset):
         batch_df = pd.concat(batch_data)
         self._batch_idx += 1
         x_cont = batch_df[self.cont_feats].values.reshape(len(batch_data), window_size, -1)
+        print(self.cont_feats)
+        print(x_cont.shape)
         if len(batch_data) < batch_size:
             x_cont = np.append(x_cont, [x_cont[0]] * (batch_size - len(batch_data)), axis=0)
         x_cont = tf.Variable(x_cont, dtype=tf.float32)
@@ -641,7 +648,6 @@ class TSTestDataset(TSTrainDataset):
             if len(batch_data) < batch_size:
                 x_cat = np.append(x_cat, [x_cat[0]] * (batch_size - len(batch_data)), axis=0)
             x_cats.append(tf.constant(x_cat, dtype=tf.float32))
-        # x_cat_key = tf.constant(x_cat[:, :1], dtype=tf.int32)
         x_cat_keys = list(batch_df.groupby(self.groupby_col).groups.keys())
         x_scale_values = tf.constant(self.ts_train.target_means[x_cat_keys].values, dtype=tf.float32)
 

@@ -1,3 +1,6 @@
+import line_profiler
+
+profile = line_profiler.LineProfiler()
 import math
 import pdb
 import tensorflow as tf
@@ -306,6 +309,7 @@ class DeepARLearner:
             mu = softplus(mu)
         return mu, sigma
 
+    @profile
     def predict(self, test_dataset: TSTestDataset, horizon=None, samples=100, point_estimate=False,
                 confidence_interval=False,
                 confidence_level=0.95, include_all_training=False, return_in_sample_predictions=True):
@@ -342,7 +346,6 @@ class DeepARLearner:
         prev_iteration_index = 0
 
         for batch_idx, batch in enumerate(test_gen):
-            print(f"batch {batch_idx}")
             x_test, scale_values, horizon_idx, iteration_index = batch
             if iteration_index is None:
                 break
@@ -354,7 +357,6 @@ class DeepARLearner:
             # reset lstm states for new sequence of predictions through time
             if iteration_index != prev_iteration_index:
                 self.model.get_layer("rnn").reset_states()
-            print(f"horizon idx :{horizon_idx}")
             # 祖先采样
             if horizon_idx > 1:
                 x_test_new = x_test[0][:, :1, -1:].assign(mu[:, :1, :])
@@ -372,7 +374,6 @@ class DeepARLearner:
             )
             # in-sample predictions (ancestral sampling)
             if horizon_idx <= 0:
-                print('in-sample ancestral sampling')
                 if horizon_idx % 5 == 0:
                     logger.info(
                         f"Making in-sample predictions with ancestral sampling. {-horizon_idx} batches remaining"
@@ -390,7 +391,6 @@ class DeepARLearner:
                     sample_list.extend(draws)
             # draw samples from learned distributions for test samples
             else:
-                print('learn from test samples')
                 if horizon_idx % 5 == 0:
                     logger.info(
                         f"Making future predictions. {horizon - horizon_idx} batches remaining"
